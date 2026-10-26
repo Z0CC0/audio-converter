@@ -1,0 +1,102 @@
+# Compila l'eseguibile Windows (nessuna installazione di Python richiesta
+# dall'utente finale) e lo pubblica nella sezione "Releases" del repository.
+#
+# Si avvia da solo a ogni push su main, oppure a mano da Actions > "Build Windows exe" > Run workflow.
+# Risultato: AudioToText-windows.zip (eseguibile + librerie + modello 'small' gia' incluso).
+
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["README.md", "LICENSE"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BUNDLED_MODEL: small
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dipendenze
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller huggingface_hub
+
+      - name: Compila con PyInstaller
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name AudioToText
+          --collect-all faster_whisper
+          --collect-all ctranslate2
+          --collect-all onnxruntime
+          --collect-all av
+          --collect-all tokenizers
+          --collect-all huggingface_hub
+          --collect-all certifi
+          --hidden-import tkinter
+          app.py
+
+      - name: Scarica il modello incluso (${{ env.BUNDLED_MODEL }})
+        run: |
+          python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-${{ env.BUNDLED_MODEL }}', local_dir=r'dist/AudioToText/models/${{ env.BUNDLED_MODEL }}')"
+          Get-ChildItem -Recurse dist/AudioToText/models | Select-Object FullName, Length
+
+      - name: Auto-test dell'eseguibile (carica il modello e trascrive un audio di prova)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist/AudioToText/AudioToText.exe" -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content dist/AudioToText/selftest.log
+          if ($p.ExitCode -ne 0) { throw "Selftest fallito (exit $($p.ExitCode))" }
+          Remove-Item dist/AudioToText/selftest.log
+
+      - name: Istruzioni nel pacchetto
+        shell: pwsh
+        run: |
+          Copy-Item README.md dist/AudioToText/README.md
+          Copy-Item LICENSE dist/AudioToText/LICENSE.txt
+          @"
+          AUDIO TO TEXT - versione Windows senza installazione
+          =====================================================
+
+          1. Estrai TUTTA la cartella dallo zip (non avviare l'exe dentro lo zip).
+          2. Doppio clic su AudioToText.exe.
+             Se Windows mostra "PC protetto da Windows": clicca "Ulteriori informazioni" > "Esegui comunque".
+             (Succede perche' il programma non e' firmato digitalmente; e' open source, vedi README.md.)
+          3. Aggiungi i file audio/video, premi "Avvia trascrizione".
+             Per ogni file viene creato un .txt con il testo completo.
+
+          Il modello '$env:BUNDLED_MODEL' e' gia' incluso nella cartella models: funziona senza internet.
+          Gli altri modelli (base, medium, large-v3...) vengono scaricati al primo uso nella stessa cartella.
+          Non serve installare Python ne' ffmpeg.
+          "@ | Set-Content -Encoding UTF8 dist/AudioToText/LEGGIMI.txt
+
+      - name: Crea lo zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/AudioToText/* -DestinationPath AudioToText-windows.zip
+
+      - name: Carica come artifact del workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioToText-windows
+          path: AudioToText-windows.zip
+
+      - name: Pubblica nella Release "latest"
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v1.0." + $env:GITHUB_RUN_NUMBER
+          gh release create $tag AudioToText-windows.zip --title "Audio to Text $tag (Windows)" --notes "Eseguibile Windows: scarica AudioToText-windows.zip, estrai la cartella e avvia AudioToText.exe. Modello '$env:BUNDLED_MODEL' incluso, funziona offline. Nessuna installazione richiesta." --latest

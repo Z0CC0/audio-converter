@@ -1,0 +1,22 @@
+# Ambienti virtuali
+.venv/
+venv/
+env/
+
+# Bytecode Python
+__pycache__/
+*.py[cod]
+
+# Modelli scaricati localmente (se si usa una cartella custom)
+models/
+
+# Output
+*.txt
+!requirements.txt
+!LICENSE.txt
+
+# Sistema operativo / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
