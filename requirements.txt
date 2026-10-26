@@ -1,2 +1,5 @@
 # Motore di trascrizione (Whisper via CTranslate2): gratuito, offline, CPU/GPU.
-faster-whisper>=1.1.0
+faster-whisper>=1.1.0,<2
+# Decoder audio/video incluso (nessun ffmpeg esterno richiesto); limite superiore
+# per evitare cambi di API non ancora collaudati.
+av>=14,<20

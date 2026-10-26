@@ -210,6 +210,63 @@ def extract_audio(source: Path, ffmpeg: str, cancel: Optional[threading.Event] =
     return Path(tmp.name)
 
 
+SAMPLE_RATE = 16000
+
+
+def read_wav_16k_mono(path: Path):
+    """Legge un WAV PCM 16 bit mono a 16 kHz (quello prodotto da extract_audio)
+    e restituisce un array float32 normalizzato in [-1, 1]."""
+    import wave
+    import numpy as np
+    with wave.open(str(path), "rb") as w:
+        if w.getnchannels() != 1 or w.getframerate() != SAMPLE_RATE or w.getsampwidth() != 2:
+            raise ValueError("WAV non nel formato atteso (mono, 16 kHz, 16 bit)")
+        raw = w.readframes(w.getnframes())
+    return np.frombuffer(raw, dtype="<i2").astype("float32") / 32768.0
+
+
+def decode_with_av(path: Path):
+    """Decodifica qualsiasi audio/video con PyAV (incluso nell'eseguibile
+    Windows, nessun ffmpeg esterno richiesto) e restituisce float32 mono 16 kHz.
+    Usa solo l'API stabile di PyAV, cosi' non dipende dalla versione."""
+    import av
+    import numpy as np
+    resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+    chunks = []
+    with av.open(str(path), mode="r") as container:
+        streams = [st for st in container.streams if st.type == "audio"]
+        if not streams:
+            raise RuntimeError(f"'{path.name}' non contiene una traccia audio")
+        stream = streams[0]
+        try:
+            stream.thread_type = "AUTO"
+        except Exception:
+            pass
+        for frame in container.decode(stream):
+            frame.pts = None  # evita errori sui timestamp non monotoni
+            for out in resampler.resample(frame):
+                chunks.append(out.to_ndarray().reshape(-1))
+        for out in resampler.resample(None):  # svuota il buffer
+            chunks.append(out.to_ndarray().reshape(-1))
+    if not chunks:
+        return np.zeros(0, dtype="float32")
+    return np.concatenate(chunks).astype("float32") / 32768.0
+
+
+def load_audio(source: Path, cancel: Optional[threading.Event] = None):
+    """Carica un file audio/video come array float32 mono 16 kHz.
+    Con ffmpeg disponibile converte tramite ffmpeg (massima compatibilita'),
+    altrimenti decodifica con PyAV."""
+    ffmpeg = find_ffmpeg()
+    if ffmpeg:
+        wav = extract_audio(source, ffmpeg, cancel)
+        try:
+            return read_wav_16k_mono(wav)
+        finally:
+            wav.unlink(missing_ok=True)
+    return decode_with_av(source)
+
+
 # ---------------------------------------------------------------------------
 # Modello
 # ---------------------------------------------------------------------------
@@ -318,19 +375,14 @@ def transcribe_file(
         if cancel is not None and cancel.is_set():
             raise TranscriptionCancelled()
 
-    ffmpeg = find_ffmpeg()
-    wav_path: Optional[Path] = None
     try:
-        # 1) Estrazione audio. Con ffmpeg convertiamo tutto in WAV 16 kHz mono:
-        #    funziona per qualsiasi formato audio o video. Senza ffmpeg
-        #    passiamo il file direttamente a faster-whisper (che decodifica
-        #    via PyAV i formati piu' comuni).
-        if ffmpeg:
-            report(0.02, f"Estrazione audio da {source.name}...")
-            wav_path = extract_audio(source, ffmpeg, cancel)
-            audio_input = str(wav_path)
-        else:
-            audio_input = str(source)
+        # 1) Decodifica audio in un array mono 16 kHz (via ffmpeg se presente,
+        #    altrimenti PyAV). Passando l'array a faster-whisper evitiamo il suo
+        #    decoder interno, che cambia con le versioni di PyAV.
+        report(0.02, f"Estrazione audio da {source.name}...")
+        audio_input = load_audio(source, cancel)
+        if audio_input.size == 0:
+            raise RuntimeError(f"'{source.name}' non contiene audio")
         check_cancel()
 
         # 2) Caricamento modello (al primo avvio lo scarica).
@@ -350,7 +402,7 @@ def transcribe_file(
             vad_parameters={"min_silence_duration_ms": 500} if vad else None,
             condition_on_previous_text=True,
         )
-        duration = float(info.duration or 0.0)
+        duration = float(getattr(info, "duration", 0) or 0.0) or len(audio_input) / SAMPLE_RATE
         lines: list[str] = []
         plain: list[str] = []
         for seg in segments:
@@ -393,8 +445,7 @@ def transcribe_file(
             text=body,
         )
     finally:
-        if wav_path is not None:
-            wav_path.unlink(missing_ok=True)
+        pass
 
 
 def _paragraphs(sentences: list[str], max_chars: int = 600) -> str:
