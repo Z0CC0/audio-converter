@@ -73,9 +73,9 @@ python app.py
 | large-v3-turbo | ~1.6 GB | media | quasi come large-v3 |
 
 Indicazione pratica: `small` per appunti vocali e riunioni in italiano/inglese; `medium` o `large-v3-turbo` per audio rumorosi, accenti forti o lingue meno comuni.
-I modelli scaricati finiscono nella cartella `models/` accanto al programma e vengono riutilizzati. Un modello copiato a mano in `models/<nome>/` (con il suo `model.bin`) viene usato senza alcun download.
+I modelli scaricati finiscono nella cartella `models/_cache/` accanto al programma e vengono riutilizzati. Un modello copiato a mano in `models/<nome>/` (con il suo `model.bin`) viene usato senza alcun download.
 
-Su schede NVIDIA con CUDA installato il programma usa la GPU in automatico. Su Mac Apple Silicon e su CPU usa la quantizzazione int8 (veloce e leggera).
+Su schede NVIDIA il programma prova la GPU e, se le librerie CUDA 12 (cuBLAS, cuDNN) non sono installate, passa da solo alla CPU: una GPU senza CUDA non e' un errore, solo piu' lenta. Su Mac Apple Silicon e su CPU usa la quantizzazione int8 (veloce e leggera).
 
 ## Uso da riga di comando (facoltativo)
 

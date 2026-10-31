@@ -206,6 +206,9 @@ def extract_audio(source: Path, ffmpeg: str, cancel: Optional[threading.Event] =
     if proc.returncode != 0:
         Path(tmp.name).unlink(missing_ok=True)
         msg = err.decode(errors="replace").strip() if err else "errore sconosciuto"
+        # Solo la prima riga, senza il prefisso "[in#0 @ 0x...]": il resto e' rumore.
+        import re
+        msg = re.sub(r"^\[[^\]]*\]\s*", "", msg.splitlines()[0]) if msg else "errore sconosciuto"
         raise RuntimeError(f"ffmpeg non riesce a leggere '{source.name}': {msg}")
     return Path(tmp.name)
 
@@ -314,9 +317,13 @@ def load_model(model_size: str = DEFAULT_MODEL, device: str = "auto", compute_ty
         if model is None:
             try:
                 model = WhisperModel(source, device=device, compute_type=compute_type, **kwargs)
+                if device == "cuda":
+                    _warmup(model)
             except Exception as e:
                 if device == "cuda":
-                    # GPU rilevata ma librerie CUDA/cuDNN incomplete: ripiega sulla CPU.
+                    # GPU rilevata ma librerie CUDA (cuBLAS/cuDNN) assenti o incomplete.
+                    # L'errore compare solo alla prima inferenza, non nel costruttore:
+                    # per questo il warm-up. Ripiega sulla CPU.
                     try:
                         model = WhisperModel(source, device="cpu", compute_type="int8", **kwargs)
                     except Exception as e2:
@@ -325,6 +332,24 @@ def load_model(model_size: str = DEFAULT_MODEL, device: str = "auto", compute_ty
                     raise RuntimeError(_model_error(model_size, e)) from e
             _model_cache[key] = model
     return model
+
+
+def _warmup(model) -> None:
+    """Prima inferenza su un secondo di silenzio. Su GPU e' qui, non nel
+    costruttore, che emergono le DLL CUDA mancanti (es. cublas64_12.dll)."""
+    import numpy as np
+    segments, _ = model.transcribe(np.zeros(SAMPLE_RATE, dtype="float32"), language="en", beam_size=1, vad_filter=False)
+    for _ in segments:
+        pass
+
+
+def local_models() -> list[str]:
+    """Nomi dei modelli gia' su disco: models/<nome>/model.bin (inclusi nel
+    pacchetto o copiati a mano) e quelli scaricati da Hugging Face in models/_cache."""
+    found = {d.name for d in models_dir().glob("*") if (d / "model.bin").is_file()}
+    for snap in (models_dir() / "_cache").glob("models--Systran--faster-whisper-*/snapshots/*/model.bin"):
+        found.add(snap.parents[2].name.replace("models--Systran--faster-whisper-", ""))
+    return sorted(found)
 
 
 def _model_error(model_size: str, e: Exception) -> str:
@@ -394,14 +419,17 @@ def transcribe_file(
         # 3) Trascrizione: faster-whisper restituisce un generatore di
         #    segmenti; l'avanzamento si calcola dal tempo di fine segmento.
         report(0.08, f"Trascrizione di {source.name}...")
-        segments, info = model.transcribe(
-            audio_input,
-            language=language,
-            beam_size=5,
-            vad_filter=vad,
-            vad_parameters={"min_silence_duration_ms": 500} if vad else None,
-            condition_on_previous_text=True,
-        )
+        try:
+            segments, info = model.transcribe(
+                audio_input,
+                language=language,
+                beam_size=5,
+                vad_filter=vad,
+                vad_parameters={"min_silence_duration_ms": 500} if vad else None,
+                condition_on_previous_text=True,
+            )
+        except ValueError as e:  # es. codice lingua non valido ("xx", "Italiano")
+            raise RuntimeError(f"Parametri non validi per '{source.name}': {str(e)[:200]}") from e
         duration = float(getattr(info, "duration", 0) or 0.0) or len(audio_input) / SAMPLE_RATE
         lines: list[str] = []
         plain: list[str] = []
@@ -433,6 +461,10 @@ def transcribe_file(
             f"Modello: {model_size}\n"
             + "-" * 60 + "\n\n"
         )
+        if not plain:
+            # Silenzio, solo musica o parlato troppo sommesso: meglio dirlo nel
+            # file che lasciare un .txt vuoto senza spiegazione.
+            body = "(nessun parlato rilevato: file silenzioso o solo musica; prova a disattivare 'Salta i silenzi')"
         out_path = output_path_for(source, out_dir)
         out_path.write_text(header + body + "\n", encoding="utf-8")
         report(1.0, f"Completato: {out_path.name}")
@@ -442,7 +474,7 @@ def transcribe_file(
             language=info.language,
             language_probability=float(info.language_probability),
             duration=duration,
-            text=body,
+            text=body if plain else "",
         )
     finally:
         pass
@@ -584,6 +616,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         cancel.set()
         print("\nInterrotto.")
         return 130
+    except RuntimeError as e:  # modello non caricabile, file illeggibile, lingua non valida
+        print(f"\nERRORE: {e}", file=sys.stderr)
+        return 1
     print()
     for r in results:
         print(f"{r.source.name}  ->  {r.output}  ({r.language}, {format_timestamp(r.duration)})")

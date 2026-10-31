@@ -145,7 +145,7 @@ class App(tk.Tk):
         self.log.configure(state="disabled")
 
     def _check_ffmpeg(self) -> None:
-        inclusi = sorted(d.name for d in tr.models_dir().glob("*") if (d / "model.bin").is_file())
+        inclusi = tr.local_models()
         if inclusi:
             self._log(f"Modelli gia' disponibili offline: {', '.join(inclusi)}. Gli altri vengono scaricati al primo uso.")
         if tr.find_ffmpeg():
@@ -251,6 +251,8 @@ class App(tk.Tk):
                     self.events.put(("log", f"ERRORE su {f.name}: {e}"))
                     continue
                 self.results.append(res)
+                if not res.text:
+                    self.events.put(("log", f"ATTENZIONE  {f.name}: nessun parlato rilevato (silenzio o solo musica). Prova senza 'Salta i silenzi'."))
                 self.events.put(("log", f"OK  {f.name}  ->  {res.output}  (lingua: {res.language}, {tr.format_timestamp(res.duration)})"))
             self.events.put(("done", None))
         except tr.TranscriptionCancelled:
